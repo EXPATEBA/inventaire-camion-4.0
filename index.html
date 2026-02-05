@@ -7,7 +7,7 @@
     
     <script type="module">
         import { initializeApp } from "https://www.gstatic.com/firebasejs/10.7.1/firebase-app.js";
-        import { getFirestore, collection, addDoc, onSnapshot, query, where, deleteDoc, doc, updateDoc, getDocs } from "https://www.gstatic.com/firebasejs/10.7.1/firebase-firestore.js";
+        import { getFirestore, collection, addDoc, onSnapshot, query, where, deleteDoc, doc, updateDoc, getDocs, orderBy } from "https://www.gstatic.com/firebasejs/10.7.1/firebase-firestore.js";
         import { getAuth, createUserWithEmailAndPassword, signInWithEmailAndPassword, onAuthStateChanged, signOut } from "https://www.gstatic.com/firebasejs/10.7.1/firebase-auth.js";
         import { getStorage, ref, uploadBytes, getDownloadURL, deleteObject } from "https://www.gstatic.com/firebasejs/10.7.1/firebase-storage.js";
 
@@ -26,7 +26,15 @@
         const app = initializeApp(firebaseConfig);
         const db = getFirestore(app);
         const auth = getAuth(app);
-        const storage = getStorage(app);
+        let storage = null;
+
+        // Vérifier si Storage est disponible
+        try {
+            storage = getStorage(app);
+            console.log("✅ Firebase Storage initialisé");
+        } catch (error) {
+            console.warn("⚠️ Storage non disponible:", error.message);
+        }
 
         let userTeamId = null;
         let currentCategoryFilter = null;
@@ -39,6 +47,15 @@
                 document.getElementById('authScreen').style.display = 'none';
                 document.getElementById('appScreen').style.display = 'block';
                 document.getElementById('userEmailDisplay').textContent = user.email;
+                
+                // Vérifier Storage
+                if (!storage) {
+                    afficherNotification('⚠️ Storage non activé - Les photos sont désactivées', 'warning');
+                    document.querySelectorAll('.photo-upload-zone').forEach(el => {
+                        el.style.display = 'none';
+                    });
+                }
+                
                 chargerCategories();
                 activerSyncTempsReel();
             } else {
@@ -49,91 +66,109 @@
 
         // CHARGER LES CATÉGORIES
         async function chargerCategories() {
-            const q = query(collection(db, "categories"), where("teamId", "==", userTeamId));
-            onSnapshot(q, (snapshot) => {
-                categories = [];
-                const catList = document.getElementById('categoryList');
-                const selectCat = document.getElementById('itemCat');
-                const selectEditCat = document.getElementById('editItemCat');
+            try {
+                const q = query(
+                    collection(db, "categories"), 
+                    where("teamId", "==", userTeamId),
+                    orderBy("ordre", "asc")
+                );
                 
-                catList.innerHTML = '<div class="category-chip active" onclick="filtrerParCategorie(null)">📦 Toutes</div>';
-                selectCat.innerHTML = '';
-                selectEditCat.innerHTML = '';
+                onSnapshot(q, (snapshot) => {
+                    categories = [];
+                    const catList = document.getElementById('categoryList');
+                    const selectCat = document.getElementById('itemCat');
+                    const selectEditCat = document.getElementById('editItemCat');
+                    
+                    catList.innerHTML = '<div class="category-chip active" onclick="filtrerParCategorie(null)">📦 Toutes</div>';
+                    selectCat.innerHTML = '<option value="">Sélectionner une catégorie</option>';
+                    selectEditCat.innerHTML = '<option value="">Sélectionner une catégorie</option>';
 
-                snapshot.forEach((docSnap) => {
-                    const cat = { id: docSnap.id, ...docSnap.data() };
-                    categories.push(cat);
+                    snapshot.forEach((docSnap) => {
+                        const cat = { id: docSnap.id, ...docSnap.data() };
+                        categories.push(cat);
+                    });
+
+                    categories.forEach(cat => {
+                        const icone = cat.icone || '📁';
+                        catList.innerHTML += `
+                            <div class="category-chip" onclick="filtrerParCategorie('${cat.id}', this)">
+                                ${icone} ${cat.nom}
+                                <button class="cat-delete" onclick="event.stopPropagation(); supprimerCategorie('${cat.id}')" title="Supprimer">×</button>
+                            </div>
+                        `;
+                        selectCat.innerHTML += `<option value="${cat.id}">${icone} ${cat.nom}</option>`;
+                        selectEditCat.innerHTML += `<option value="${cat.id}">${icone} ${cat.nom}</option>`;
+                    });
+
+                    console.log(`✅ ${categories.length} catégories chargées`);
+                }, (error) => {
+                    console.error("❌ Erreur chargement catégories:", error);
+                    afficherNotification('❌ Erreur de chargement des catégories', 'error');
                 });
-
-                // Trier par ordre
-                categories.sort((a, b) => (a.ordre || 0) - (b.ordre || 0));
-
-                categories.forEach(cat => {
-                    catList.innerHTML += `
-                        <div class="category-chip" onclick="filtrerParCategorie('${cat.id}')">
-                            ${cat.icone || '📁'} ${cat.nom}
-                            <button class="cat-delete" onclick="event.stopPropagation(); supprimerCategorie('${cat.id}')" title="Supprimer">×</button>
-                        </div>
-                    `;
-                    selectCat.innerHTML += `<option value="${cat.id}">${cat.nom}</option>`;
-                    selectEditCat.innerHTML += `<option value="${cat.id}">${cat.nom}</option>`;
-                });
-            });
+            } catch (error) {
+                console.error("❌ Erreur système catégories:", error);
+            }
         }
 
         // SYNCHRONISATION TEMPS RÉEL
         function activerSyncTempsReel() {
-            const q = query(collection(db, "inventaire"), where("teamId", "==", userTeamId));
-            
-            onSnapshot(q, (snapshot) => {
-                const list = document.getElementById('inventoryList');
-                list.innerHTML = "";
-                let total = 0;
-                let items = [];
-
-                snapshot.forEach((docSnap) => {
-                    const item = { id: docSnap.id, ...docSnap.data() };
-                    items.push(item);
-                });
-
-                // Filtrer par catégorie si nécessaire
-                if (currentCategoryFilter) {
-                    items = items.filter(item => item.categorieId === currentCategoryFilter);
-                }
-
-                total = items.length;
-
-                items.forEach(item => {
-                    const catName = categories.find(c => c.id === item.categorieId)?.nom || 'Non classé';
-                    const catIcon = categories.find(c => c.id === item.categorieId)?.icone || '📦';
-                    const mainPhoto = item.photos && item.photos.length > 0 ? item.photos[0] : '';
-                    
-                    list.innerHTML += `
-                        <div class="item-card">
-                            ${mainPhoto ? `<div class="item-photo" style="background-image: url('${mainPhoto}')" onclick="ouvrirGalerie('${item.id}')"></div>` : '<div class="item-photo-placeholder" onclick="ouvrirGalerie(\'' + item.id + '\')">📷</div>'}
-                            <div class="item-header">
-                                <div class="item-title">${item.nom}</div>
-                                <div class="item-category">${catIcon} ${catName}</div>
-                            </div>
-                            <div class="item-details">
-                                <p><strong>Quantité:</strong> ${item.quantite}</p>
-                                <p><strong>Emplacement:</strong> ${item.emplacement || '-'}</p>
-                                ${item.notes ? `<p class="item-notes"><strong>Notes:</strong> ${item.notes}</p>` : ''}
-                            </div>
-                            <div class="item-actions">
-                                <button class="btn btn-edit" onclick="modifierItem('${item.id}')">✏️ Modifier</button>
-                                <button class="btn btn-danger" onclick="supprimerItem('${item.id}')">🗑️</button>
-                            </div>
-                        </div>
-                    `;
-                });
-
-                document.getElementById('totalItems').textContent = total;
+            try {
+                const q = query(collection(db, "inventaire"), where("teamId", "==", userTeamId));
                 
-                if (items.length === 0) {
-                    list.innerHTML = '<div class="empty-state">📦 Aucun article dans cette catégorie</div>';
-                }
-            });
+                onSnapshot(q, (snapshot) => {
+                    const list = document.getElementById('inventoryList');
+                    list.innerHTML = "";
+                    let total = 0;
+                    let items = [];
+
+                    snapshot.forEach((docSnap) => {
+                        const item = { id: docSnap.id, ...docSnap.data() };
+                        items.push(item);
+                    });
+
+                    // Filtrer par catégorie si nécessaire
+                    if (currentCategoryFilter) {
+                        items = items.filter(item => item.categorieId === currentCategoryFilter);
+                    }
+
+                    total = items.length;
+
+                    items.forEach(item => {
+                        const catName = categories.find(c => c.id === item.categorieId)?.nom || 'Non classé';
+                        const catIcon = categories.find(c => c.id === item.categorieId)?.icone || '📦';
+                        const mainPhoto = item.photos && item.photos.length > 0 ? item.photos[0] : '';
+                        
+                        list.innerHTML += `
+                            <div class="item-card">
+                                ${mainPhoto ? `<div class="item-photo" style="background-image: url('${mainPhoto}')" onclick="ouvrirGalerie('${item.id}')"></div>` : '<div class="item-photo-placeholder" onclick="ouvrirGalerie(\'' + item.id + '\')">📷</div>'}
+                                <div class="item-header">
+                                    <div class="item-title">${item.nom}</div>
+                                    <div class="item-category">${catIcon} ${catName}</div>
+                                </div>
+                                <div class="item-details">
+                                    <p><strong>Quantité:</strong> ${item.quantite}</p>
+                                    <p><strong>Emplacement:</strong> ${item.emplacement || '-'}</p>
+                                    ${item.notes ? `<p class="item-notes"><strong>Notes:</strong> ${item.notes}</p>` : ''}
+                                </div>
+                                <div class="item-actions">
+                                    <button class="btn btn-edit" onclick="modifierItem('${item.id}')">✏️ Modifier</button>
+                                    <button class="btn btn-danger" onclick="supprimerItem('${item.id}')">🗑️</button>
+                                </div>
+                            </div>
+                        `;
+                    });
+
+                    document.getElementById('totalItems').textContent = total;
+                    
+                    if (items.length === 0) {
+                        list.innerHTML = '<div class="empty-state">📦 Aucun article dans cette catégorie</div>';
+                    }
+                }, (error) => {
+                    console.error("❌ Erreur sync inventaire:", error);
+                });
+            } catch (error) {
+                console.error("❌ Erreur système sync:", error);
+            }
         }
 
         // FILTRER PAR CATÉGORIE
@@ -157,25 +192,45 @@
         // AJOUTER UNE CATÉGORIE
         window.ajouterCategorie = async (e) => {
             e.preventDefault();
-            const nom = document.getElementById('newCatName').value;
-            const icone = document.getElementById('newCatIcon').value || '📁';
             
-            await addDoc(collection(db, "categories"), {
-                nom: nom,
-                icone: icone,
-                teamId: userTeamId,
-                ordre: categories.length,
-                dateCreation: Date.now()
-            });
+            const nom = document.getElementById('newCatName').value.trim();
+            const icone = document.getElementById('newCatIcon').value.trim() || '📁';
             
-            e.target.reset();
-            fermerModal('categoryModal');
+            if (!nom) {
+                afficherNotification('❌ Le nom de la catégorie est obligatoire', 'error');
+                return;
+            }
+            
+            try {
+                console.log("Ajout catégorie:", nom, icone);
+                
+                await addDoc(collection(db, "categories"), {
+                    nom: nom,
+                    icone: icone,
+                    teamId: userTeamId,
+                    ordre: categories.length,
+                    dateCreation: Date.now()
+                });
+                
+                afficherNotification('✅ Catégorie créée avec succès', 'success');
+                e.target.reset();
+                fermerModal('categoryModal');
+            } catch (error) {
+                console.error("❌ Erreur ajout catégorie:", error);
+                afficherNotification('❌ Erreur: ' + error.message, 'error');
+            }
         };
 
         // SUPPRIMER UNE CATÉGORIE
         window.supprimerCategorie = async (id) => {
             if(confirm("Supprimer cette catégorie ? Les articles associés ne seront pas supprimés.")) {
-                await deleteDoc(doc(db, "categories", id));
+                try {
+                    await deleteDoc(doc(db, "categories", id));
+                    afficherNotification('🗑️ Catégorie supprimée', 'success');
+                } catch (error) {
+                    console.error("❌ Erreur suppression:", error);
+                    afficherNotification('❌ Erreur: ' + error.message, 'error');
+                }
             }
         };
 
@@ -183,81 +238,108 @@
         window.ajouterArticle = async (e) => {
             e.preventDefault();
             
-            const form = e.target;
-            const photos = [];
+            const nom = document.getElementById('itemName').value.trim();
+            const quantite = parseInt(document.getElementById('itemQty').value);
+            const categorieId = document.getElementById('itemCat').value;
+            const emplacement = document.getElementById('itemLoc').value.trim();
+            const notes = document.getElementById('itemNotes').value.trim();
             
-            // Upload des photos
-            const fileInput = document.getElementById('itemPhotos');
-            if (fileInput.files.length > 0) {
-                document.getElementById('uploadProgress').style.display = 'block';
-                
-                for (let i = 0; i < Math.min(fileInput.files.length, 5); i++) {
-                    const file = fileInput.files[i];
-                    const storageRef = ref(storage, `inventaire/${userTeamId}/${Date.now()}_${file.name}`);
-                    await uploadBytes(storageRef, file);
-                    const url = await getDownloadURL(storageRef);
-                    photos.push(url);
-                }
-                
-                document.getElementById('uploadProgress').style.display = 'none';
+            if (!nom || !quantite || !categorieId) {
+                afficherNotification('❌ Remplissez tous les champs obligatoires', 'error');
+                return;
             }
             
-            await addDoc(collection(db, "inventaire"), {
-                nom: document.getElementById('itemName').value,
-                quantite: parseInt(document.getElementById('itemQty').value),
-                categorieId: document.getElementById('itemCat').value,
-                emplacement: document.getElementById('itemLoc').value,
-                notes: document.getElementById('itemNotes').value,
-                photos: photos,
-                teamId: userTeamId,
-                dateCreation: Date.now(),
-                dateModification: Date.now()
-            });
-            
-            form.reset();
-            afficherNotification('✅ Article ajouté avec succès');
+            try {
+                const photos = [];
+                
+                // Upload des photos si Storage disponible
+                if (storage) {
+                    const fileInput = document.getElementById('itemPhotos');
+                    if (fileInput.files.length > 0) {
+                        document.getElementById('uploadProgress').style.display = 'block';
+                        
+                        for (let i = 0; i < Math.min(fileInput.files.length, 5); i++) {
+                            const file = fileInput.files[i];
+                            try {
+                                const storageRef = ref(storage, `inventaire/${userTeamId}/${Date.now()}_${file.name}`);
+                                const snapshot = await uploadBytes(storageRef, file);
+                                const url = await getDownloadURL(snapshot.ref);
+                                photos.push(url);
+                                console.log(`✅ Photo ${i+1} uploadée`);
+                            } catch (uploadError) {
+                                console.error(`❌ Erreur upload photo ${i+1}:`, uploadError);
+                            }
+                        }
+                        
+                        document.getElementById('uploadProgress').style.display = 'none';
+                    }
+                }
+                
+                await addDoc(collection(db, "inventaire"), {
+                    nom: nom,
+                    quantite: quantite,
+                    categorieId: categorieId,
+                    emplacement: emplacement,
+                    notes: notes,
+                    photos: photos,
+                    teamId: userTeamId,
+                    dateCreation: Date.now(),
+                    dateModification: Date.now()
+                });
+                
+                e.target.reset();
+                afficherNotification('✅ Article ajouté avec succès', 'success');
+            } catch (error) {
+                console.error("❌ Erreur ajout article:", error);
+                afficherNotification('❌ Erreur: ' + error.message, 'error');
+            }
         };
 
         // MODIFIER UN ARTICLE
         window.modifierItem = async (id) => {
-            const q = query(collection(db, "inventaire"), where("teamId", "==", userTeamId));
-            const snapshot = await getDocs(q);
-            
-            let item = null;
-            snapshot.forEach(docSnap => {
-                if (docSnap.id === id) {
-                    item = { id: docSnap.id, ...docSnap.data() };
-                }
-            });
-            
-            if (!item) return;
-            
-            // Pré-remplir le formulaire
-            document.getElementById('editItemId').value = item.id;
-            document.getElementById('editItemName').value = item.nom;
-            document.getElementById('editItemQty').value = item.quantite;
-            document.getElementById('editItemCat').value = item.categorieId;
-            document.getElementById('editItemLoc').value = item.emplacement || '';
-            document.getElementById('editItemNotes').value = item.notes || '';
-            
-            // Afficher les photos existantes
-            const photoPreview = document.getElementById('editPhotoPreview');
-            photoPreview.innerHTML = '';
-            if (item.photos && item.photos.length > 0) {
-                item.photos.forEach((url, index) => {
-                    photoPreview.innerHTML += `
-                        <div class="photo-thumb">
-                            <img src="${url}" alt="Photo ${index + 1}">
-                            <button type="button" class="photo-delete" onclick="supprimerPhotoEdit(${index})" title="Supprimer">×</button>
-                        </div>
-                    `;
+            try {
+                const q = query(collection(db, "inventaire"), where("teamId", "==", userTeamId));
+                const snapshot = await getDocs(q);
+                
+                let item = null;
+                snapshot.forEach(docSnap => {
+                    if (docSnap.id === id) {
+                        item = { id: docSnap.id, ...docSnap.data() };
+                    }
                 });
+                
+                if (!item) return;
+                
+                // Pré-remplir le formulaire
+                document.getElementById('editItemId').value = item.id;
+                document.getElementById('editItemName').value = item.nom;
+                document.getElementById('editItemQty').value = item.quantite;
+                document.getElementById('editItemCat').value = item.categorieId || '';
+                document.getElementById('editItemLoc').value = item.emplacement || '';
+                document.getElementById('editItemNotes').value = item.notes || '';
+                
+                // Afficher les photos existantes
+                const photoPreview = document.getElementById('editPhotoPreview');
+                photoPreview.innerHTML = '';
+                if (item.photos && item.photos.length > 0) {
+                    item.photos.forEach((url, index) => {
+                        photoPreview.innerHTML += `
+                            <div class="photo-thumb">
+                                <img src="${url}" alt="Photo ${index + 1}">
+                                <button type="button" class="photo-delete" onclick="supprimerPhotoEdit(${index})" title="Supprimer">×</button>
+                            </div>
+                        `;
+                    });
+                }
+                
+                // Stocker les photos actuelles
+                window.currentEditPhotos = item.photos || [];
+                
+                ouvrirModal('editModal');
+            } catch (error) {
+                console.error("❌ Erreur chargement article:", error);
+                afficherNotification('❌ Erreur: ' + error.message, 'error');
             }
-            
-            // Stocker les photos actuelles
-            window.currentEditPhotos = item.photos || [];
-            
-            ouvrirModal('editModal');
         };
 
         // SAUVEGARDER LES MODIFICATIONS
@@ -265,36 +347,56 @@
             e.preventDefault();
             
             const id = document.getElementById('editItemId').value;
-            const photos = [...window.currentEditPhotos];
+            const nom = document.getElementById('editItemName').value.trim();
+            const quantite = parseInt(document.getElementById('editItemQty').value);
+            const categorieId = document.getElementById('editItemCat').value;
             
-            // Ajouter les nouvelles photos
-            const fileInput = document.getElementById('editItemPhotos');
-            if (fileInput.files.length > 0) {
-                document.getElementById('editUploadProgress').style.display = 'block';
-                
-                for (let i = 0; i < Math.min(fileInput.files.length, 5 - photos.length); i++) {
-                    const file = fileInput.files[i];
-                    const storageRef = ref(storage, `inventaire/${userTeamId}/${Date.now()}_${file.name}`);
-                    await uploadBytes(storageRef, file);
-                    const url = await getDownloadURL(storageRef);
-                    photos.push(url);
-                }
-                
-                document.getElementById('editUploadProgress').style.display = 'none';
+            if (!nom || !quantite || !categorieId) {
+                afficherNotification('❌ Remplissez tous les champs obligatoires', 'error');
+                return;
             }
             
-            await updateDoc(doc(db, "inventaire", id), {
-                nom: document.getElementById('editItemName').value,
-                quantite: parseInt(document.getElementById('editItemQty').value),
-                categorieId: document.getElementById('editItemCat').value,
-                emplacement: document.getElementById('editItemLoc').value,
-                notes: document.getElementById('editItemNotes').value,
-                photos: photos,
-                dateModification: Date.now()
-            });
-            
-            fermerModal('editModal');
-            afficherNotification('✅ Article modifié avec succès');
+            try {
+                const photos = [...window.currentEditPhotos];
+                
+                // Ajouter les nouvelles photos
+                if (storage) {
+                    const fileInput = document.getElementById('editItemPhotos');
+                    if (fileInput.files.length > 0) {
+                        document.getElementById('editUploadProgress').style.display = 'block';
+                        
+                        for (let i = 0; i < Math.min(fileInput.files.length, 5 - photos.length); i++) {
+                            const file = fileInput.files[i];
+                            try {
+                                const storageRef = ref(storage, `inventaire/${userTeamId}/${Date.now()}_${file.name}`);
+                                const snapshot = await uploadBytes(storageRef, file);
+                                const url = await getDownloadURL(snapshot.ref);
+                                photos.push(url);
+                            } catch (uploadError) {
+                                console.error("❌ Erreur upload:", uploadError);
+                            }
+                        }
+                        
+                        document.getElementById('editUploadProgress').style.display = 'none';
+                    }
+                }
+                
+                await updateDoc(doc(db, "inventaire", id), {
+                    nom: nom,
+                    quantite: quantite,
+                    categorieId: categorieId,
+                    emplacement: document.getElementById('editItemLoc').value.trim(),
+                    notes: document.getElementById('editItemNotes').value.trim(),
+                    photos: photos,
+                    dateModification: Date.now()
+                });
+                
+                fermerModal('editModal');
+                afficherNotification('✅ Article modifié avec succès', 'success');
+            } catch (error) {
+                console.error("❌ Erreur modification:", error);
+                afficherNotification('❌ Erreur: ' + error.message, 'error');
+            }
         };
 
         // SUPPRIMER PHOTO EN ÉDITION
@@ -306,38 +408,47 @@
         // SUPPRIMER UN ARTICLE
         window.supprimerItem = async (id) => {
             if(confirm("Supprimer cet article ?")) {
-                await deleteDoc(doc(db, "inventaire", id));
-                afficherNotification('🗑️ Article supprimé');
+                try {
+                    await deleteDoc(doc(db, "inventaire", id));
+                    afficherNotification('🗑️ Article supprimé', 'success');
+                } catch (error) {
+                    console.error("❌ Erreur suppression:", error);
+                    afficherNotification('❌ Erreur: ' + error.message, 'error');
+                }
             }
         };
 
         // OUVRIR GALERIE PHOTO
         window.ouvrirGalerie = async (id) => {
-            const q = query(collection(db, "inventaire"), where("teamId", "==", userTeamId));
-            const snapshot = await getDocs(q);
-            
-            let item = null;
-            snapshot.forEach(docSnap => {
-                if (docSnap.id === id) {
-                    item = { id: docSnap.id, ...docSnap.data() };
-                }
-            });
-            
-            if (!item) return;
-            
-            const gallery = document.getElementById('photoGallery');
-            gallery.innerHTML = '';
-            
-            if (item.photos && item.photos.length > 0) {
-                item.photos.forEach(url => {
-                    gallery.innerHTML += `<img src="${url}" alt="${item.nom}">`;
+            try {
+                const q = query(collection(db, "inventaire"), where("teamId", "==", userTeamId));
+                const snapshot = await getDocs(q);
+                
+                let item = null;
+                snapshot.forEach(docSnap => {
+                    if (docSnap.id === id) {
+                        item = { id: docSnap.id, ...docSnap.data() };
+                    }
                 });
-            } else {
-                gallery.innerHTML = '<p style="text-align: center; color: #999;">Aucune photo disponible</p>';
+                
+                if (!item) return;
+                
+                const gallery = document.getElementById('photoGallery');
+                gallery.innerHTML = '';
+                
+                if (item.photos && item.photos.length > 0) {
+                    item.photos.forEach(url => {
+                        gallery.innerHTML += `<img src="${url}" alt="${item.nom}">`;
+                    });
+                } else {
+                    gallery.innerHTML = '<p style="text-align: center; color: #999;">Aucune photo disponible</p>';
+                }
+                
+                document.getElementById('galleryTitle').textContent = item.nom;
+                ouvrirModal('galleryModal');
+            } catch (error) {
+                console.error("❌ Erreur galerie:", error);
             }
-            
-            document.getElementById('galleryTitle').textContent = item.nom;
-            ouvrirModal('galleryModal');
         };
 
         // GESTION DES MODALS
@@ -350,11 +461,11 @@
         };
 
         // NOTIFICATION
-        function afficherNotification(message) {
+        function afficherNotification(message, type = 'success') {
             const notif = document.getElementById('notification');
             notif.textContent = message;
-            notif.classList.add('show');
-            setTimeout(() => notif.classList.remove('show'), 3000);
+            notif.className = 'notification show ' + type;
+            setTimeout(() => notif.classList.remove('show'), 4000);
         }
 
         // RECHERCHE
@@ -363,8 +474,8 @@
             const cards = document.querySelectorAll('.item-card');
             
             cards.forEach(card => {
-                const titre = card.querySelector('.item-title').textContent.toLowerCase();
-                const details = card.querySelector('.item-details').textContent.toLowerCase();
+                const titre = card.querySelector('.item-title')?.textContent.toLowerCase() || '';
+                const details = card.querySelector('.item-details')?.textContent.toLowerCase() || '';
                 
                 if (titre.includes(terme) || details.includes(terme)) {
                     card.style.display = 'block';
@@ -377,14 +488,32 @@
         // AUTHENTIFICATION
         window.handleLogin = (e) => {
             e.preventDefault();
-            signInWithEmailAndPassword(auth, document.getElementById('loginEmail').value, document.getElementById('loginPassword').value)
-                .catch(err => alert("❌ Erreur: " + err.message));
+            const email = document.getElementById('loginEmail').value;
+            const password = document.getElementById('loginPassword').value;
+            
+            signInWithEmailAndPassword(auth, email, password)
+                .then(() => {
+                    console.log("✅ Connexion réussie");
+                })
+                .catch(err => {
+                    console.error("❌ Erreur connexion:", err);
+                    alert("❌ Erreur: " + err.message);
+                });
         };
 
         window.handleRegister = (e) => {
             e.preventDefault();
-            createUserWithEmailAndPassword(auth, document.getElementById('regEmail').value, document.getElementById('regPass').value)
-                .catch(err => alert("❌ Erreur: " + err.message));
+            const email = document.getElementById('regEmail').value;
+            const password = document.getElementById('regPass').value;
+            
+            createUserWithEmailAndPassword(auth, email, password)
+                .then(() => {
+                    console.log("✅ Compte créé");
+                })
+                .catch(err => {
+                    console.error("❌ Erreur création compte:", err);
+                    alert("❌ Erreur: " + err.message);
+                });
         };
 
         window.logout = () => signOut(auth);
@@ -1022,12 +1151,9 @@
             position: fixed;
             top: 20px;
             right: 20px;
-            background: linear-gradient(135deg, var(--success), #00cc66);
-            color: #000;
             padding: 15px 25px;
             border-radius: 10px;
             font-weight: 700;
-            box-shadow: 0 5px 20px rgba(0, 255, 136, 0.4);
             z-index: 2000;
             transform: translateX(400px);
             transition: transform 0.3s;
@@ -1035,6 +1161,24 @@
         
         .notification.show {
             transform: translateX(0);
+        }
+        
+        .notification.success {
+            background: linear-gradient(135deg, var(--success), #00cc66);
+            color: #000;
+            box-shadow: 0 5px 20px rgba(0, 255, 136, 0.4);
+        }
+        
+        .notification.error {
+            background: linear-gradient(135deg, var(--danger), #cc0000);
+            color: #fff;
+            box-shadow: 0 5px 20px rgba(255, 77, 77, 0.4);
+        }
+        
+        .notification.warning {
+            background: linear-gradient(135deg, var(--warning), #ff8800);
+            color: #000;
+            box-shadow: 0 5px 20px rgba(255, 170, 0, 0.4);
         }
         
         hr {
@@ -1102,7 +1246,7 @@
             
             <div class="category-section">
                 <div id="categoryList" class="category-list">
-                    <div class="category-chip active" onclick="filtrerParCategorie(null)">📦 Toutes</div>
+                    <div class="category-chip active" onclick="filtrerParCategorie(null, this)">📦 Toutes</div> Toutes</div>
                 </div>
                 <button class="btn btn-secondary" onclick="ouvrirModal('categoryModal')">➕ Nouvelle catégorie</button>
             </div>
@@ -1146,7 +1290,10 @@
             <h3>➕ Nouvelle catégorie</h3>
             <form onsubmit="ajouterCategorie(event)">
                 <input type="text" id="newCatName" placeholder="Nom de la catégorie" required>
-                <input type="text" id="newCatIcon" placeholder="Icône (emoji)" maxlength="2">
+                <input type="text" id="newCatIcon" placeholder="Icône (emoji, ex: 🔧)" maxlength="2">
+                <p style="color: rgba(255,255,255,0.5); font-size: 12px; margin: 10px 0;">
+                    Exemples d'emojis : 🔧 🔩 ⚙️ 🛠️ ⚡ 🔋 💡 📦 🎨 🧰
+                </p>
                 <button type="submit" class="btn btn-primary">CRÉER LA CATÉGORIE</button>
             </form>
         </div>
